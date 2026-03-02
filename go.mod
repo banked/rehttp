@@ -1,4 +1,4 @@
-module github.com/PuerkitoBio/rehttp
+module github.com/banked/rehttp
 
 go 1.16
 

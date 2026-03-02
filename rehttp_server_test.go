@@ -530,3 +530,80 @@ func TestRedirects(t *testing.T) {
 		assert.Equal(t, body, string(got))
 	})
 }
+
+func TestClientRetryWithBodyNoRace(t *testing.T) {
+	attempts := &sync.Map{}
+	var totalAttempts int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&totalAttempts, 1)
+
+		reqID := r.Header.Get("X-Request-ID")
+
+		val, _ := attempts.LoadOrStore(reqID, new(int32))
+		attemptCount := atomic.AddInt32(val.(*int32), 1)
+
+		if attemptCount == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	tr := NewTransport(nil, RetryAll(RetryMaxRetries(1), RetryStatuses(http.StatusInternalServerError)), ConstDelay(0))
+
+	client := &http.Client{
+		Transport: tr,
+	}
+
+	bodyContent := strings.Repeat("x", 1024*1024) // 1MB body
+
+	const numRequests = 20
+	var wg sync.WaitGroup
+	wg.Add(numRequests)
+
+	for i := 0; i < numRequests; i++ {
+		go func(reqID int) {
+			defer wg.Done()
+
+			req, err := http.NewRequest("POST", srv.URL+"/test", strings.NewReader(bodyContent))
+			if err != nil {
+				t.Errorf("failed to create request: %v", err)
+				return
+			}
+			req.Header.Set("Content-Type", "text/plain")
+			req.Header.Set("X-Request-ID", fmt.Sprintf("req-%d", reqID))
+
+			res, err := client.Do(req)
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			defer res.Body.Close()
+
+			if res.StatusCode != http.StatusOK {
+				t.Errorf("expected status 200, got %d", res.StatusCode)
+				return
+			}
+
+			respBody, err := io.ReadAll(res.Body)
+			if err != nil {
+				t.Errorf("failed to read response body: %v", err)
+				return
+			}
+			if string(respBody) != bodyContent {
+				t.Errorf("response body mismatch")
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Each request should have 2 attempts (first 500, then 200)
+	expectedAttempts := int32(numRequests * 2)
+	actualAttempts := atomic.LoadInt32(&totalAttempts)
+	assert.Equal(t, expectedAttempts, actualAttempts)
+}

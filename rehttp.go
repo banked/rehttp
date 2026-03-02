@@ -339,7 +339,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	done := contextForRequest(req)
 
 	// buffer the body if needed
-	var br *bytes.Reader
+	var bodyBytes []byte
 	if req.Body != nil && req.Body != http.NoBody && !preventRetry {
 		var buf bytes.Buffer
 		if _, err := io.Copy(&buf, req.Body); err != nil {
@@ -349,8 +349,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		req.Body.Close()
 
-		br = bytes.NewReader(buf.Bytes())
-		req.Body = ioutil.NopCloser(br)
+		bodyBytes = buf.Bytes()
+		req.Body = ioutil.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
 	for {
@@ -374,15 +374,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return injectCancelReader(res, cancel), err
 		}
 
-		if br != nil {
+		if bodyBytes != nil {
 			// Per Go's doc: "RoundTrip should not modify the request,
 			// except for consuming and closing the Body", so the only thing
 			// to reset on the request is the body, if any.
-			if _, serr := br.Seek(0, 0); serr != nil {
-				// failed to retry, return the results
-				return injectCancelReader(res, cancel), err
-			}
-			reqWithTimeout.Body = ioutil.NopCloser(br)
+			reqWithTimeout.Body = ioutil.NopCloser(bytes.NewReader(bodyBytes))
 		}
 		// close the disposed response's body, if any
 		if res != nil {
